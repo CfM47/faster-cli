@@ -12,9 +12,20 @@ use crate::render::summary::{Detail, summary};
 use crate::report::Report;
 use crate::session::{self, Event, Scope};
 
+/// Drawn above the help text.
+///
+/// A raw string so the backslashes in the art are not read as escapes.
+const BANNER: &str = r#"
+__________             _____     __________________
+___  ____/_____ _________  /_    __  ____/__  /__(_)
+__  /_   _  __ `/_  ___/  __/    _  /    __  /__  /
+_  __/   / /_/ /_(__  )/ /_      / /___  _  / _  /
+/_/      \__,_/ /____/ \__/      \____/  /_/  /_/
+"#;
+
 /// Measure the speed of an internet connection.
 #[derive(Debug, Parser)]
-#[command(name = "fast", version, about, long_about = None)]
+#[command(name = "fast", version, about, long_about = None, before_help = BANNER)]
 pub struct Cli {
     /// Skip the upload measurement
     #[arg(long)]
