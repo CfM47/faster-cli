@@ -71,7 +71,7 @@ impl Magnitude {
     }
 
     /// Returns how many decimals keep the reading meaningful at this scale.
-    const fn decimals(self) -> usize {
+    pub const fn decimals(self) -> usize {
         match self {
             Self::Kilobits => 0,
             Self::Megabits => 1,

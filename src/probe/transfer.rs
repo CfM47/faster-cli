@@ -24,6 +24,7 @@ const SAMPLE_INTERVAL: Duration = Duration::from_millis(200);
 const MAX_CONSECUTIVE_FAILURES: usize = 3;
 const STABILITY_WINDOW: usize = 8;
 const STABILITY_TOLERANCE: f64 = 0.05;
+const SETTLING_SPAN: Duration = Duration::from_secs(1);
 
 /// Sent repeatedly to fill an upload body.
 ///
@@ -61,11 +62,23 @@ impl Default for Plan {
     }
 }
 
+/// Whether a sample is worth showing as a reading yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stage {
+    /// Connections are still opening and slow start has not finished, so the
+    /// rate on offer is not yet one anybody should be shown.
+    Warmup,
+    /// The rate is averaged over enough of the measured window to stand.
+    Measuring,
+}
+
 /// A snapshot of a transfer still in flight.
 #[derive(Clone, Copy, Debug)]
 pub struct Progress {
     /// Which phase produced this snapshot.
     pub direction: &'static str,
+    /// Whether [`Progress::rate`] is settled enough to display.
+    pub stage: Stage,
     /// Bytes moved since the phase began, including the warmup.
     pub transferred: Bytes,
     /// Time since the phase began, including the warmup.
@@ -281,13 +294,20 @@ async fn supervise(
             opened += 1;
         }
 
-        let (moved, over) = timeline
-            .measured(plan.warmup)
+        let window = timeline.span_since(plan.warmup);
+        let (moved, over) = window
+            .or_else(|| timeline.total())
             .unwrap_or((transferred, elapsed));
         let rate = Bitrate::from_transfer(moved, over);
         rates.push(rate.bits_per_second());
         report(Progress {
             direction,
+            // A rate averaged over a sliver of the window swings wildly, so a
+            // sample only counts as a reading once it covers enough of one.
+            stage: match window {
+                Some((_, covered)) if covered >= SETTLING_SPAN => Stage::Measuring,
+                _ => Stage::Warmup,
+            },
             transferred,
             elapsed,
             rate,
