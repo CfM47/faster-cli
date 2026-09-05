@@ -175,11 +175,38 @@ impl Direction for Upload {
 ///
 /// The direction lives in the type, so a download figure cannot be passed
 /// where an upload one is expected.
-#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Throughput<D: Direction> {
     bytes: Bytes,
     elapsed: Duration,
     direction: PhantomData<D>,
+}
+
+// Written out rather than derived: a derive would demand `D: Clone + Copy +
+// Debug + PartialEq`, which the direction tags cannot satisfy because they are
+// uninhabited. The bounds are spurious anyway, since no `D` value is stored.
+impl<D: Direction> Clone for Throughput<D> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<D: Direction> Copy for Throughput<D> {}
+
+impl<D: Direction> PartialEq for Throughput<D> {
+    fn eq(&self, other: &Self) -> bool {
+        self.bytes == other.bytes && self.elapsed == other.elapsed
+    }
+}
+
+impl<D: Direction> fmt::Debug for Throughput<D> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Throughput")
+            .field("direction", &D::LABEL)
+            .field("bytes", &self.bytes)
+            .field("elapsed", &self.elapsed)
+            .finish()
+    }
 }
 
 impl<D: Direction> Throughput<D> {
@@ -244,6 +271,15 @@ mod tests {
         let download = Throughput::<Download>::new(Bytes::new(2_000_000), Duration::from_secs(2));
         assert_eq!(download.bitrate().megabits_per_second(), 8.0);
         assert_eq!(Download::LABEL, "Download");
+    }
+
+    #[test]
+    fn throughput_stays_copy_despite_its_uninhabited_tag() {
+        fn assert_copy<T: Copy>(_: T) {}
+        let download = Throughput::<Download>::new(Bytes::new(1), Duration::from_secs(1));
+        assert_copy(download);
+        assert_eq!(download.bytes(), Bytes::new(1));
+        assert_eq!(download.elapsed(), Duration::from_secs(1));
     }
 
     #[test]
