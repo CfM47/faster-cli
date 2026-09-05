@@ -43,7 +43,7 @@ pub struct Plan {
     min_duration: Duration,
     /// How long to transfer before stopping regardless of stability.
     max_duration: Duration,
-    /// How many connections to saturate the link with.
+    /// How many connections to end up saturating the link with.
     connections: NonZeroUsize,
     /// How many bytes to move per request.
     chunk: Bytes,
@@ -55,7 +55,7 @@ impl Default for Plan {
             warmup: Duration::from_secs(3),
             min_duration: Duration::from_secs(8),
             max_duration: Duration::from_secs(20),
-            connections: NonZeroUsize::new(4).expect("4 is not zero"),
+            connections: NonZeroUsize::new(8).expect("8 is not zero"),
             chunk: Bytes::new(25_000_000),
         }
     }
@@ -209,17 +209,26 @@ async fn run<P: Phase>(
     let deadline = started + plan.max_duration;
 
     let mut workers = JoinSet::new();
-    for _ in 0..plan.connections.get() {
+    let mut open_connection = |workers: &mut JoinSet<Result<()>>| {
         let client = client.clone();
         let url = url.clone();
         let counter = Arc::clone(&counter);
         workers.spawn(async move {
             transfer_until(P::KIND, &client, &url, plan.chunk, &counter, deadline).await
         });
-    }
+    };
+    open_connection(&mut workers);
 
-    let (timeline, failure) =
-        supervise(&mut workers, &counter, started, plan, P::LABEL, report).await;
+    let (timeline, failure) = supervise(
+        &mut workers,
+        &mut open_connection,
+        &counter,
+        started,
+        plan,
+        P::LABEL,
+        report,
+    )
+    .await;
 
     let (transferred, elapsed) = timeline.measured(plan.warmup).unwrap_or((
         Bytes::new(counter.load(Ordering::Relaxed)),
@@ -235,6 +244,12 @@ async fn run<P: Phase>(
 
 /// Samples the shared counter until the phase should end, then stops the workers.
 ///
+/// Connections are opened one per sample rather than all at once, so their
+/// slow starts are staggered instead of bursting into the same queue, and the
+/// ramp is confined to the warmup: once the measurement window opens the
+/// connection count is fixed, which is what makes the bytes counted inside it
+/// comparable from one sample to the next.
+///
 /// Stops early once the reading has settled, so a steady link is not held at
 /// full tilt for the maximum duration, but never before the minimum, so the
 /// warmup is always excluded from a real measurement window.
@@ -243,6 +258,7 @@ async fn run<P: Phase>(
 /// if the phase ends up having transferred nothing at all.
 async fn supervise(
     workers: &mut JoinSet<Result<()>>,
+    open_connection: &mut dyn FnMut(&mut JoinSet<Result<()>>),
     counter: &AtomicU64,
     started: Instant,
     plan: Plan,
@@ -252,12 +268,18 @@ async fn supervise(
     let mut timeline = Timeline::default();
     let mut rates = Vec::new();
     let mut failure = None;
+    let mut opened = 1;
 
     loop {
         tokio::time::sleep(SAMPLE_INTERVAL).await;
         let elapsed = started.elapsed();
         let transferred = Bytes::new(counter.load(Ordering::Relaxed));
         timeline.record(elapsed, transferred);
+
+        if opened < plan.connections.get() && elapsed < plan.warmup {
+            open_connection(workers);
+            opened += 1;
+        }
 
         let (moved, over) = timeline
             .measured(plan.warmup)
@@ -401,7 +423,19 @@ mod tests {
         let plan = Plan::default();
         assert!(plan.warmup < plan.min_duration);
         assert!(plan.min_duration <= plan.max_duration);
-        assert_eq!(plan.connections.get(), 4);
+    }
+
+    #[test]
+    fn the_connection_ramp_finishes_before_the_measurement_window_opens() {
+        let plan = Plan::default();
+        let ramp = SAMPLE_INTERVAL * (plan.connections.get() as u32 - 1);
+        assert!(
+            ramp < plan.warmup,
+            "opening {} connections takes {ramp:?}, which spills past the {:?} warmup and would \
+             leave the connection count changing inside the measured window",
+            plan.connections,
+            plan.warmup
+        );
     }
 
     #[test]
