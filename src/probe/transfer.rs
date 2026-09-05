@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use futures_util::{StreamExt, stream};
 use reqwest::header::CONTENT_TYPE;
-use reqwest::{Body, Client};
+use reqwest::{Body, Client, StatusCode};
 use tokio::task::JoinSet;
 
 use crate::endpoint::Endpoint;
@@ -351,6 +351,9 @@ async fn transfer_until(
         };
         match outcome {
             Ok(()) => consecutive_failures = 0,
+            // Retrying a refusal to serve is what the refusal is asking us not
+            // to do, so it ends the phase rather than spending its attempts.
+            Err(Error::RateLimited) => return Err(Error::RateLimited),
             Err(failure) => {
                 consecutive_failures += 1;
                 if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
@@ -413,12 +416,12 @@ fn upload_body(total: Bytes, counter: Arc<AtomicU64>, deadline: Instant) -> Body
 
 fn check(response: reqwest::Response) -> Result<reqwest::Response> {
     let status = response.status();
-    if status.is_success() {
-        Ok(response)
-    } else {
-        Err(Error::UnexpectedStatus {
+    match status {
+        _ if status.is_success() => Ok(response),
+        StatusCode::TOO_MANY_REQUESTS => Err(Error::RateLimited),
+        _ => Err(Error::UnexpectedStatus {
             status: status.as_u16(),
-        })
+        }),
     }
 }
 

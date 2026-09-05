@@ -1,5 +1,6 @@
 //! Internet speed measurement primitives backing the `fast` binary.
 
+pub mod cli;
 pub mod endpoint;
 pub mod error;
 pub mod probe;
