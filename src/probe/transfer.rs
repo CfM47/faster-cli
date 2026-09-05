@@ -22,6 +22,8 @@ use crate::units::{Bitrate, Bytes, Direction, Download, Throughput, Upload};
 
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(200);
 const MAX_CONSECUTIVE_FAILURES: usize = 3;
+const STABILITY_WINDOW: usize = 8;
+const STABILITY_TOLERANCE: f64 = 0.05;
 
 /// Sent repeatedly to fill an upload body.
 ///
@@ -30,20 +32,29 @@ const MAX_CONSECUTIVE_FAILURES: usize = 3;
 static UPLOAD_PIECE: [u8; 64 * 1024] = [0; 64 * 1024];
 
 /// How a transfer phase should be run.
+///
+/// Fields are private and the only way to build one is [`Plan::default`], so
+/// a plan whose warmup outlasts its own time bounds cannot be constructed.
 #[derive(Clone, Copy, Debug)]
 pub struct Plan {
-    /// How long to keep transferring for.
-    pub duration: Duration,
+    /// How long to transfer before the measurement window opens.
+    warmup: Duration,
+    /// How long to transfer before an early stop is allowed.
+    min_duration: Duration,
+    /// How long to transfer before stopping regardless of stability.
+    max_duration: Duration,
     /// How many connections to saturate the link with.
-    pub connections: NonZeroUsize,
+    connections: NonZeroUsize,
     /// How many bytes to move per request.
-    pub chunk: Bytes,
+    chunk: Bytes,
 }
 
 impl Default for Plan {
     fn default() -> Self {
         Self {
-            duration: Duration::from_secs(10),
+            warmup: Duration::from_secs(3),
+            min_duration: Duration::from_secs(8),
+            max_duration: Duration::from_secs(20),
             connections: NonZeroUsize::new(4).expect("4 is not zero"),
             chunk: Bytes::new(25_000_000),
         }
@@ -55,17 +66,80 @@ impl Default for Plan {
 pub struct Progress {
     /// Which phase produced this snapshot.
     pub direction: &'static str,
-    /// Bytes moved so far.
+    /// Bytes moved since the phase began, including the warmup.
     pub transferred: Bytes,
-    /// Time since the phase began.
+    /// Time since the phase began, including the warmup.
     pub elapsed: Duration,
+    /// The rate so far, measured the same way the final result is.
+    ///
+    /// Carried rather than derived from the two fields above so that the live
+    /// display converges on the number that is ultimately reported instead of
+    /// drifting away from it.
+    pub rate: Bitrate,
 }
 
-impl Progress {
-    /// Returns the rate averaged over the phase so far.
-    pub fn rate(self) -> Bitrate {
-        Bitrate::from_transfer(self.transferred, self.elapsed)
+/// Cumulative byte counts sampled while a phase runs.
+#[derive(Debug, Default)]
+struct Timeline {
+    samples: Vec<Sample>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Sample {
+    at: Duration,
+    transferred: Bytes,
+}
+
+impl Timeline {
+    fn record(&mut self, at: Duration, transferred: Bytes) {
+        self.samples.push(Sample { at, transferred });
     }
+
+    /// Returns the bytes moved after `warmup` and how long that took.
+    ///
+    /// Measuring a span rather than the whole run is what makes the reading
+    /// honest: TCP slow start and the initial fill of the socket buffers are
+    /// one-off costs at the start, so excluding them removes a bias that would
+    /// otherwise shrink as the run got longer.
+    fn measured(&self, warmup: Duration) -> Option<(Bytes, Duration)> {
+        self.span_since(warmup).or_else(|| self.total())
+    }
+
+    fn span_since(&self, warmup: Duration) -> Option<(Bytes, Duration)> {
+        let last = self.samples.last()?;
+        let first = self.samples.iter().find(|sample| sample.at >= warmup)?;
+        let elapsed = last.at.checked_sub(first.at)?;
+        if elapsed.is_zero() {
+            return None;
+        }
+        let moved = last
+            .transferred
+            .get()
+            .checked_sub(first.transferred.get())?;
+        Some((Bytes::new(moved), elapsed))
+    }
+
+    fn total(&self) -> Option<(Bytes, Duration)> {
+        let last = self.samples.last()?;
+        (!last.at.is_zero()).then_some((last.transferred, last.at))
+    }
+}
+
+/// Returns whether the recent readings have settled.
+///
+/// Compares the spread of the trailing window against its own floor, so the
+/// threshold means the same thing on a 5 Mbps link as on a 5 Gbps one.
+fn has_converged(rates: &[f64], tolerance: f64) -> bool {
+    if rates.len() < STABILITY_WINDOW {
+        return false;
+    }
+    let window = &rates[rates.len() - STABILITY_WINDOW..];
+    let highest = window.iter().copied().fold(f64::MIN, f64::max);
+    let lowest = window.iter().copied().fold(f64::MAX, f64::min);
+    if lowest <= 0.0 {
+        return false;
+    }
+    (highest - lowest) / lowest <= tolerance
 }
 
 /// Which way the bytes flow, resolved at runtime inside a worker.
@@ -132,7 +206,7 @@ async fn run<P: Phase>(
 
     let counter = Arc::new(AtomicU64::new(0));
     let started = Instant::now();
-    let deadline = started + plan.duration;
+    let deadline = started + plan.max_duration;
 
     let mut workers = JoinSet::new();
     for _ in 0..plan.connections.get() {
@@ -144,10 +218,13 @@ async fn run<P: Phase>(
         });
     }
 
-    let failure = supervise(&mut workers, &counter, started, deadline, P::LABEL, report).await;
+    let (timeline, failure) =
+        supervise(&mut workers, &counter, started, plan, P::LABEL, report).await;
 
-    let transferred = Bytes::new(counter.load(Ordering::Relaxed));
-    let elapsed = started.elapsed();
+    let (transferred, elapsed) = timeline.measured(plan.warmup).unwrap_or((
+        Bytes::new(counter.load(Ordering::Relaxed)),
+        started.elapsed(),
+    ));
     if transferred.is_zero() {
         return Err(failure.unwrap_or(Error::NoData {
             direction: P::LABEL,
@@ -156,26 +233,42 @@ async fn run<P: Phase>(
     Ok(Throughput::new(transferred, elapsed))
 }
 
-/// Samples the shared counter until the deadline, then stops the workers.
+/// Samples the shared counter until the phase should end, then stops the workers.
 ///
-/// Returns the first worker failure seen, which only matters if the phase ends
-/// up having transferred nothing at all.
+/// Stops early once the reading has settled, so a steady link is not held at
+/// full tilt for the maximum duration, but never before the minimum, so the
+/// warmup is always excluded from a real measurement window.
+///
+/// The returned failure is the first one a worker reported, which only matters
+/// if the phase ends up having transferred nothing at all.
 async fn supervise(
     workers: &mut JoinSet<Result<()>>,
     counter: &AtomicU64,
     started: Instant,
-    deadline: Instant,
+    plan: Plan,
     direction: &'static str,
     report: &mut dyn FnMut(Progress),
-) -> Option<Error> {
+) -> (Timeline, Option<Error>) {
+    let mut timeline = Timeline::default();
+    let mut rates = Vec::new();
     let mut failure = None;
 
     loop {
         tokio::time::sleep(SAMPLE_INTERVAL).await;
+        let elapsed = started.elapsed();
+        let transferred = Bytes::new(counter.load(Ordering::Relaxed));
+        timeline.record(elapsed, transferred);
+
+        let (moved, over) = timeline
+            .measured(plan.warmup)
+            .unwrap_or((transferred, elapsed));
+        let rate = Bitrate::from_transfer(moved, over);
+        rates.push(rate.bits_per_second());
         report(Progress {
             direction,
-            transferred: Bytes::new(counter.load(Ordering::Relaxed)),
-            elapsed: started.elapsed(),
+            transferred,
+            elapsed,
+            rate,
         });
 
         while let Some(joined) = workers.try_join_next() {
@@ -184,13 +277,14 @@ async fn supervise(
             }
         }
 
-        if Instant::now() >= deadline || workers.is_empty() {
+        let settled = elapsed >= plan.min_duration && has_converged(&rates, STABILITY_TOLERANCE);
+        if workers.is_empty() || elapsed >= plan.max_duration || settled {
             break;
         }
     }
 
     workers.shutdown().await;
-    failure
+    (timeline, failure)
 }
 
 /// Issues requests until the deadline, counting bytes as they move.
@@ -290,20 +384,23 @@ fn check(response: reqwest::Response) -> Result<reqwest::Response> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn progress_reports_the_average_rate_so_far() {
-        let progress = Progress {
-            direction: Download::LABEL,
-            transferred: Bytes::new(2_500_000),
-            elapsed: Duration::from_secs(2),
-        };
-        assert_eq!(progress.rate().megabits_per_second(), 10.0);
+    /// Builds a timeline from `(second, cumulative megabyte)` pairs.
+    fn timeline(points: &[(u64, u64)]) -> Timeline {
+        let mut timeline = Timeline::default();
+        for (second, megabytes) in points {
+            timeline.record(
+                Duration::from_secs(*second),
+                Bytes::new(megabytes * 1_000_000),
+            );
+        }
+        timeline
     }
 
     #[test]
-    fn the_default_plan_is_time_boxed() {
+    fn the_default_plan_warms_up_inside_its_own_bounds() {
         let plan = Plan::default();
-        assert_eq!(plan.duration, Duration::from_secs(10));
+        assert!(plan.warmup < plan.min_duration);
+        assert!(plan.min_duration <= plan.max_duration);
         assert_eq!(plan.connections.get(), 4);
     }
 
@@ -311,5 +408,62 @@ mod tests {
     fn each_direction_tag_selects_its_own_request() {
         assert_eq!(Download::KIND, Kind::Download);
         assert_eq!(Upload::KIND, Kind::Upload);
+    }
+
+    #[test]
+    fn the_measured_span_excludes_the_warmup() {
+        // A link that crawls for 2s while slow start opens up, then settles
+        // at 10 MB/s. Counting from zero would report 8.3 MB/s.
+        let recorded = timeline(&[(0, 0), (1, 1), (2, 2), (3, 12), (4, 22), (5, 32)]);
+        let (moved, over) = recorded
+            .measured(Duration::from_secs(2))
+            .expect("the span is well defined");
+        assert_eq!(moved, Bytes::new(30_000_000));
+        assert_eq!(over, Duration::from_secs(3));
+        assert_eq!(
+            Bitrate::from_transfer(moved, over).megabits_per_second(),
+            80.0
+        );
+    }
+
+    #[test]
+    fn a_span_shorter_than_the_warmup_falls_back_to_the_whole_run() {
+        let recorded = timeline(&[(0, 0), (1, 5)]);
+        let (moved, over) = recorded
+            .measured(Duration::from_secs(30))
+            .expect("the total is still known");
+        assert_eq!(moved, Bytes::new(5_000_000));
+        assert_eq!(over, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn an_empty_timeline_measures_nothing() {
+        assert!(Timeline::default().measured(Duration::ZERO).is_none());
+    }
+
+    #[test]
+    fn convergence_needs_a_full_settled_window() {
+        let settled = vec![100.0; STABILITY_WINDOW];
+        assert!(has_converged(&settled, STABILITY_TOLERANCE));
+
+        assert!(!has_converged(&settled[1..], STABILITY_TOLERANCE));
+
+        let mut climbing = settled.clone();
+        climbing.push(140.0);
+        assert!(!has_converged(&climbing, STABILITY_TOLERANCE));
+    }
+
+    #[test]
+    fn convergence_is_judged_relative_to_the_link_speed() {
+        // The same 2 Mbps spread settles a slow link but not a fast one.
+        let fast: Vec<f64> = (0..STABILITY_WINDOW)
+            .map(|index| 1_000.0 + index as f64 * 0.25)
+            .collect();
+        assert!(has_converged(&fast, STABILITY_TOLERANCE));
+
+        let slow: Vec<f64> = (0..STABILITY_WINDOW)
+            .map(|index| 10.0 + index as f64 * 0.25)
+            .collect();
+        assert!(!has_converged(&slow, STABILITY_TOLERANCE));
     }
 }
