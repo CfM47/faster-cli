@@ -33,10 +33,6 @@ pub enum Error {
     #[error("server returned an unexpected response: {detail}")]
     MalformedResponse { detail: String },
 
-    /// Every latency probe failed, so no round trip time could be derived.
-    #[error("no latency probe completed")]
-    NoLatencySamples,
-
     /// A transfer phase ran to completion without moving any bytes.
     #[error("no data was transferred during the {direction} phase")]
     NoData { direction: &'static str },
