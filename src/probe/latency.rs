@@ -50,7 +50,7 @@ impl Latency {
     }
 
     /// Summarises raw round trip times, or returns `None` if there are none.
-    fn from_samples(mut samples: Vec<Duration>) -> Option<Self> {
+    pub(crate) fn from_samples(mut samples: Vec<Duration>) -> Option<Self> {
         if samples.is_empty() {
             return None;
         }

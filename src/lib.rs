@@ -3,4 +3,5 @@
 pub mod endpoint;
 pub mod error;
 pub mod probe;
+pub mod report;
 pub mod units;
