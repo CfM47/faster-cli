@@ -1,0 +1,165 @@
+# Block font for the large speed display.
+#
+# HOW TO ADD OR REPLACE A GLYPH
+#
+#   1. Find the "@ x" line for the character, or add a new one.
+#   2. Paste the art on the lines below it. That is all.
+#
+# A line starting with "@" declares which character the following rows draw.
+# Every line until the next "@" is a row of that glyph. Lines starting with
+# "#" are comments and are skipped.
+#
+# You do not have to line anything up. Rows are padded on the right to the
+# widest row in their own glyph, so an editor that strips trailing spaces
+# cannot break the art. Leading spaces ARE significant: they position the
+# glyph horizontally.
+#
+# A glyph with fewer rows than the tallest is padded at the TOP, so it sits on
+# the same baseline as the digits. That is why the full stop below is only its
+# two visible rows rather than six blank lines and then the art.
+#
+# Glyphs may differ in width from each other. They should not differ in
+# height: a taller glyph raises the height of every frame. Characters with no
+# glyph here render as blank space.
+#
+# `cargo test` checks that this file parses, that every glyph is the same
+# height, and that nothing needed for a reading is missing.
+
+@ 0
+   ▄▄▄▄
+  ██▀▀██
+ ██    ██
+ ██ ██ ██
+ ██    ██
+  ██▄▄██
+   ▀▀▀▀
+
+@ 1
+   ▄▄▄
+  █▀██
+    ██
+    ██
+    ██
+ ▄▄▄██▄▄▄
+ ▀▀▀▀▀▀▀▀
+
+
+@ 2
+  ▄▄▄▄▄
+ █▀▀▀▀██▄
+       ██
+     ▄█▀
+   ▄█▀
+ ▄██▄▄▄▄▄
+ ▀▀▀▀▀▀▀▀
+
+@ 3
+  ▄▄▄▄▄
+ █▀▀▀▀██▄
+      ▄██
+   █████
+      ▀██
+ █▄▄▄▄██▀
+  ▀▀▀▀▀
+
+@ 4
+     ▄▄▄
+    ▄███
+   █▀ ██
+ ▄█▀  ██
+ ████████
+      ██
+      ▀▀
+
+@ 5
+ ▄▄▄▄▄▄▄
+ ██▀▀▀▀▀
+ ██▄▄▄▄
+ █▀▀▀▀██▄
+       ██
+ █▄▄▄▄██▀
+  ▀▀▀▀▀
+
+@ 6
+   ▄▄▄▄
+  ██▀▀▀█
+ ██ ▄▄▄
+ ███▀▀██▄
+ ██    ██
+ ▀██▄▄██▀
+   ▀▀▀▀
+
+@ 7
+ ▄▄▄▄▄▄▄▄
+ ▀▀▀▀▀███
+     ▄██
+     ██
+    ██
+   ██
+  ▀▀
+
+@ 8
+   ▄▄▄▄
+ ▄██▀▀██▄
+ ██▄  ▄██
+  ██████
+ ██▀  ▀██
+ ▀██▄▄██▀
+   ▀▀▀▀
+
+@ 9
+  ▄▄▄▄
+ ▄██▀▀██▄
+ ██    ██
+ ▀██▄▄███
+   ▀▀▀ ██
+  █▄▄▄██
+   ▀▀▀▀
+
+@ .
+
+
+
+
+
+    ██
+    ▀▀
+
+# UNIT LETTERS
+#
+# These spell the unit next to the reading: MBPS, KBPS, GBPS. While they are
+# empty the unit is drawn as small text under the number instead, so the
+# display works either way and fills itself in as you paste.
+#
+# Keep them the same height as the digits above. A taller glyph, such
+# as a lowercase "p" with a descender, raises the height of every frame.
+
+@ M
+██▄  ▄██
+██ ▀▀ ██
+██    ██
+
+@ B
+▄▄▄▄
+██▄██
+██▄█▀
+
+@ P
+▄▄▄▄
+██▄█▀
+██
+
+@ S
+ ▄▄▄▄
+███▄▄
+▄▄██▀
+
+@ K
+██ ▄█▀
+████
+██ ▀█▄
+
+@ G
+ ▄████
+██  ▄▄▄
+ ▀███▀
