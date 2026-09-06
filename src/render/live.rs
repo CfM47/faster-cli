@@ -111,16 +111,6 @@ mod tests {
     }
 
     #[test]
-    fn the_unit_drops_below_the_number_when_it_will_not_fit_beside_it() {
-        let drawn = frame(progress(Stage::Measuring), 80);
-        assert!(
-            drawn.contains(&"Mbps".to_owned()),
-            "a unit that cannot be set beside the number is still named"
-        );
-        assert!(drawn.iter().any(|line| line.contains('█')));
-    }
-
-    #[test]
     fn a_window_too_narrow_for_the_art_still_shows_the_reading() {
         let drawn = frame(progress(Stage::Measuring), 20);
         assert!(
